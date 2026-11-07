@@ -1,0 +1,9 @@
+{
+  "name": "pi-session-notes",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "scripts": { "test": "node --experimental-strip-types --test note.test.ts" },
+  "pi": { "extensions": ["./index.ts"] }
+}

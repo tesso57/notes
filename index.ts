@@ -1,0 +1,132 @@
+import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+
+const packageRoot = fileURLToPath(new URL("./", import.meta.url));
+const noteMessageType = "pi-session-notes-request";
+
+/** Resolve a destination template against the project working directory. */
+export function notePath(cwd: string, sessionId: string, env = process.env.PI_NOTES_PATH): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
+    throw new Error("保存先に使えない session ID です。");
+  }
+  let template = env;
+  if (!template) {
+    try {
+      const config = JSON.parse(readFileSync(resolve(cwd, ".pi", "notes.json"), "utf8"));
+      if (typeof config.path !== "string" || !config.path.trim()) throw new Error("path に空でない文字列を指定してください。");
+      template = config.path;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  template ||= "_notes/{sessionId}/note.md";
+  const path = template.replaceAll("{sessionId}", sessionId);
+  return resolve(cwd, path === "~" ? homedir() : path.startsWith("~/") ? resolve(homedir(), path.slice(2)) : path);
+}
+
+export default function noteExtension(pi: ExtensionAPI) {
+  let noteRun = false;
+  let epoch = 0;
+  let stopped = false;
+
+  // レンダラーだけを差し替え、ツールの実行や guard の判定には介入しない。
+  // resolver はツール行の生成時に呼ばれるため、その時点でノート化中かを固定する。
+  pi.registerToolRenderer((_name, next) => {
+    if (!noteRun) return next();
+    const empty = () => ({ render: () => [], invalidate: () => {} });
+    return {
+      renderShell: "self",
+      renderCall: empty,
+      renderResult(result, _options, _theme, context) {
+        if (!context.isError) return empty();
+        const message = result.content
+          .filter((item) => item.type === "text")
+          .map((item) => item.text)
+          .join("\n") || "ノート作成中のツール実行に失敗しました。";
+        return { render: (width: number) => message.split("\n").map((line) => line.slice(0, width)), invalidate: () => {} };
+      },
+    };
+  });
+
+  const requestNote = async (ctx: ExtensionContext) => {
+    const requestEpoch = ++epoch;
+    try {
+      const sessionId = ctx.sessionManager.getSessionId();
+      const path = notePath(ctx.cwd, sessionId);
+      const procedure = await readFile(resolve(packageRoot, "procedure.md"), "utf8");
+      // 読み込み中の入力・セッション切替・重複依頼で古い依頼を無効にする。
+      if (stopped || epoch !== requestEpoch || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+      const source = {
+        sessionId,
+        sessionFile: ctx.sessionManager.getSessionFile() ?? null,
+        cwd: ctx.cwd,
+        recordedAt: new Date().toISOString(),
+      };
+      pi.events.emit("guard:trust-dir", { path: dirname(path), by: "note" });
+      // custom message として送り、ユーザーの相談とノート化の実行を区別する。
+      pi.sendMessage({
+        customType: noteMessageType,
+        // 手順全文はモデルへ渡すが、チャット画面には表示しない。
+        display: false,
+        content: [
+          "ここまでの会話を、次の手順に従ってノートとして実際に保存してください。",
+          "保存後の報告は、成功なら『ノートを更新しました。』の一文だけにしてください。失敗時は理由を短く報告してください。",
+          `保存先ファイル（絶対パス）: ${JSON.stringify(path)}`,
+          `記録元メタデータ: ${JSON.stringify(source)}`,
+          "",
+          procedure,
+        ].join("\n"),
+      }, { triggerTurn: true });
+    } catch (error) {
+      ctx.ui.notify(`ノート作成を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+  };
+
+  pi.on("session_start", (_event, ctx) => {
+    epoch++;
+    noteRun = stopped = false;
+    try {
+      const path = notePath(ctx.cwd, ctx.sessionManager.getSessionId());
+      pi.events.emit("guard:trust-dir", { path: dirname(path), by: "note" });
+    } catch (error) {
+      ctx.ui.notify(`ノートの保存先を読み込めませんでした: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+  });
+  pi.on("session_shutdown", () => {
+    stopped = true;
+    epoch++;
+  });
+  pi.on("input", () => { epoch++; });
+  pi.on("session_before_compact", () => { epoch++; });
+  pi.on("session_before_tree", () => { epoch++; });
+  pi.on("before_agent_start", (event) => {
+    epoch++;
+    noteRun = event.messageType === "custom" && event.message.customType === noteMessageType;
+  });
+  pi.on("agent_settled", async (event, ctx) => {
+    const wasNoteRun = noteRun;
+    noteRun = false;
+    // 保存失敗や中断でも、自動リトライの無限ループにはしない。
+    if (stopped || wasNoteRun || event.aborted) return;
+    await requestNote(ctx);
+  });
+
+  pi.registerCommand("note", {
+    description: "現在のセッションの会話を今すぐノートに記録する",
+    handler: async (args, ctx) => {
+      if (args.trim()) {
+        ctx.ui.notify("使い方: /note（保存先は session ID で固定です）", "warning");
+        return;
+      }
+      if (!ctx.isIdle()) {
+        ctx.ui.notify("処理が落ち着いてから /note を実行してください。", "warning");
+        return;
+      }
+      await requestNote(ctx);
+    },
+  });
+}
