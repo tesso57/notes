@@ -1,12 +1,94 @@
 import { readFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const packageRoot = fileURLToPath(new URL("./", import.meta.url));
 const noteMessageType = "pi-session-notes-request";
+
+type FactoryPaths = { plan: string; review: string; learnings: string };
+
+function expandPath(cwd: string, template: string, sessionId: string): string {
+  const path = template.replaceAll("{sessionId}", sessionId);
+  return resolve(cwd, path === "~" ? homedir() : path.startsWith("~/") ? resolve(homedir(), path.slice(2)) : path);
+}
+
+// 存在しない保存先も、存在する先祖まで解決してリンク経由の重複を比較する。
+function comparablePath(path: string): string {
+  const suffix: string[] = [];
+  let current = path;
+  for (;;) {
+    try {
+      return resolve(realpathSync(current), ...suffix);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      suffix.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
+export function factoryPaths(cwd: string, sessionId: string, note: string): FactoryPaths | undefined {
+  if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) throw new Error("保存先に使えない session ID です。");
+  let config: unknown;
+  try {
+    config = JSON.parse(readFileSync(resolve(cwd, ".pi/notes-factory.json"), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("Factory 設定は JSON オブジェクトにしてください。");
+  const settings = config as Record<string, unknown>;
+  const names = ["plan", "review", "learnings"] as const;
+  for (const key of Object.keys(settings)) {
+    if (!names.includes(key as typeof names[number])) throw new Error(`不明な Factory 設定: ${key}`);
+  }
+  const paths = {} as FactoryPaths;
+  for (const name of names) {
+    const template = name in settings ? settings[name] : `_notes/{sessionId}/factory/${name}.md`;
+    if (typeof template !== "string" || !template.trim()) throw new Error(`${name} に空でないパスを指定してください。`);
+    paths[name] = expandPath(cwd, template, sessionId);
+  }
+  if (new Set([note, ...Object.values(paths)].map(comparablePath)).size !== 4) throw new Error("ノートの保存先が重複しています。");
+  return paths;
+}
+
+type ExtraDocument = { path: string; description: string };
+
+function extraDocuments(cwd: string, sessionId: string, occupied: string[]): ExtraDocument[] {
+  let config: unknown;
+  try {
+    config = JSON.parse(readFileSync(resolve(cwd, ".pi/notes-extra.json"), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  if (!config || typeof config !== "object" || Array.isArray(config) ||
+      Object.keys(config).some(key => key !== "documents") ||
+      !Array.isArray((config as { documents?: unknown }).documents)) {
+    throw new Error("追加ノート設定には documents 配列を指定してください。");
+  }
+  const seen = new Set(occupied.map(comparablePath));
+  return (config as { documents: unknown[] }).documents.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value) ||
+        Object.keys(value).some(key => key !== "path" && key !== "description")) {
+      throw new Error("追加ノートには path と description を指定してください。");
+    }
+    const { path, description } = value as Record<string, unknown>;
+    if (typeof path !== "string" || !path.trim() || typeof description !== "string" || !description.trim()) {
+      throw new Error("追加ノートの path と description は空でない文字列にしてください。");
+    }
+    const resolved = expandPath(cwd, path, sessionId);
+    const comparable = comparablePath(resolved);
+    if (seen.has(comparable)) throw new Error("ノートの保存先が重複しています。");
+    seen.add(comparable);
+    return { path: resolved, description };
+  });
+}
 
 /** Resolve a destination template against the project working directory. */
 export function notePath(cwd: string, sessionId: string, env = process.env.PI_NOTES_PATH): string {
@@ -24,8 +106,7 @@ export function notePath(cwd: string, sessionId: string, env = process.env.PI_NO
     }
   }
   template ||= "_notes/{sessionId}/note.md";
-  const path = template.replaceAll("{sessionId}", sessionId);
-  return resolve(cwd, path === "~" ? homedir() : path.startsWith("~/") ? resolve(homedir(), path.slice(2)) : path);
+  return expandPath(cwd, template, sessionId);
 }
 
 export default function noteExtension(pi: ExtensionAPI) {
@@ -52,21 +133,30 @@ export default function noteExtension(pi: ExtensionAPI) {
     };
   });
 
-  const requestNote = async (ctx: ExtensionContext) => {
+  const requestNote = async (ctx: ExtensionContext, manual = false) => {
     const requestEpoch = ++epoch;
     try {
       const sessionId = ctx.sessionManager.getSessionId();
       const path = notePath(ctx.cwd, sessionId);
+      const factory = manual ? factoryPaths(ctx.cwd, sessionId, path) : undefined;
+      const extras = manual ? extraDocuments(ctx.cwd, sessionId, [path, ...Object.values(factory ?? {})]) : [];
       const procedure = await readFile(resolve(packageRoot, "procedure.md"), "utf8");
+      const factoryProcedure = factory ? await readFile(resolve(packageRoot, "factory-procedure.md"), "utf8") : "";
       // 読み込み中の入力・セッション切替・重複依頼で古い依頼を無効にする。
-      if (stopped || epoch !== requestEpoch || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+      if (stopped || epoch !== requestEpoch) return;
+      if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+        if (manual) ctx.ui.notify("待機中の処理が終わってから /note を実行してください。", "warning");
+        return;
+      }
       const source = {
         sessionId,
         sessionFile: ctx.sessionManager.getSessionFile() ?? null,
         cwd: ctx.cwd,
         recordedAt: new Date().toISOString(),
       };
-      pi.events.emit("guard:trust-dir", { path: dirname(path), by: "note" });
+      for (const dir of new Set([path, ...Object.values(factory ?? {}), ...extras.map(extra => extra.path)].map(dirname))) {
+        pi.events.emit("guard:trust-dir", { path: dir, by: "note" });
+      }
       // custom message として送り、ユーザーの相談とノート化の実行を区別する。
       pi.sendMessage({
         customType: noteMessageType,
@@ -79,6 +169,9 @@ export default function noteExtension(pi: ExtensionAPI) {
           `記録元メタデータ: ${JSON.stringify(source)}`,
           "",
           procedure,
+          ...(factory ? ["", `Factory 保存先（絶対パス）: ${JSON.stringify(factory)}`, factoryProcedure] : []),
+          ...(extras.length ? ["", `追加ノート（絶対パスと記録内容）: ${JSON.stringify(extras)}`,
+            "通常ノートに加え、各追加ノートは指定された記録内容に該当する情報がある場合だけ更新してください。既存ファイルは全文を読み、既存の文脈と出典を保持してください。指定されたファイル以外は変更せず、記録元メタデータを残してください。複数ファイルの保存に失敗した場合は結果を正確に報告してください。"] : []),
         ].join("\n"),
       }, { triggerTurn: true });
     } catch (error) {
@@ -101,6 +194,8 @@ export default function noteExtension(pi: ExtensionAPI) {
     epoch++;
   });
   pi.on("input", () => { epoch++; });
+  pi.on("session_before_switch", () => { epoch++; });
+  pi.on("session_before_fork", () => { epoch++; });
   pi.on("session_before_compact", () => { epoch++; });
   pi.on("session_before_tree", () => { epoch++; });
   pi.on("before_agent_start", (event) => {
@@ -126,7 +221,7 @@ export default function noteExtension(pi: ExtensionAPI) {
         ctx.ui.notify("処理が落ち着いてから /note を実行してください。", "warning");
         return;
       }
-      await requestNote(ctx);
+      await requestNote(ctx, true);
     },
   });
 }
