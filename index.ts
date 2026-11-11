@@ -15,6 +15,15 @@ function expandPath(cwd: string, template: string, sessionId: string): string {
   return resolve(cwd, path === "~" ? homedir() : path.startsWith("~/") ? resolve(homedir(), path.slice(2)) : path);
 }
 
+function readOptionalJson(path: string): unknown {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 // 存在しない保存先も、存在する先祖まで解決してリンク経由の重複を比較する。
 function comparablePath(path: string): string {
   const suffix: string[] = [];
@@ -58,13 +67,8 @@ function claimPath(seen: Set<string>, path: string): void {
 
 export function factoryPaths(cwd: string, sessionId: string, note: string): FactoryPaths | undefined {
   if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) throw new Error("保存先に使えない session ID です。");
-  let config: unknown;
-  try {
-    config = JSON.parse(readFileSync(resolve(cwd, ".pi/notes-factory.json"), "utf8"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
+  const config = readOptionalJson(resolve(cwd, ".pi/notes-factory.json"));
+  if (config === undefined) return undefined;
   if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("Factory 設定は JSON オブジェクトにしてください。");
   const settings = config as Record<string, unknown>;
   const names = ["plan", "review", "learnings"] as const;
@@ -85,13 +89,8 @@ export function factoryPaths(cwd: string, sessionId: string, note: string): Fact
 type ExtraDocument = { path: string; description: string };
 
 function extraDocuments(cwd: string, sessionId: string, occupied: string[]): ExtraDocument[] {
-  let config: unknown;
-  try {
-    config = JSON.parse(readFileSync(resolve(cwd, ".pi/notes-extra.json"), "utf8"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
+  const config = readOptionalJson(resolve(cwd, ".pi/notes-extra.json"));
+  if (config === undefined) return [];
   if (!config || typeof config !== "object" || Array.isArray(config) ||
       Object.keys(config).some(key => key !== "documents") ||
       !Array.isArray((config as { documents?: unknown }).documents)) {

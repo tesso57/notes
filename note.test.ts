@@ -144,6 +144,22 @@ test("追加ファイルが通常ノートや Factory と衝突したら保存�
   } finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
+test("不正な追加ノート設定は手動保存を中止し、通常の自動記録を妨げない", async () => {
+  const cwd = mkdtempSync(resolve(tmpdir(), "pi-notes-invalid-extra-"));
+  try {
+    mkdirSync(resolve(cwd, ".pi"));
+    for (const contents of ["{", "null", JSON.stringify({ documents: [{ path: "x.md" }] })]) {
+      writeFileSync(resolve(cwd, ".pi/notes-extra.json"), contents);
+      const mock = setup(cwd);
+      await mock.emit("agent_settled", { aborted: false });
+      assert.equal(mock.messages.length, 1);
+      await mock.run();
+      assert.equal(mock.messages.length, 1);
+      assert.equal(mock.notifications.length, 1);
+    }
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
 test("シンボリックリンク経由で同じ保存先を指定したら記録を開始しない", async () => {
   const cwd = mkdtempSync(resolve(tmpdir(), "pi-notes-alias-"));
   try {
