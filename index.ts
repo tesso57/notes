@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,18 +18,42 @@ function expandPath(cwd: string, template: string, sessionId: string): string {
 // 存在しない保存先も、存在する先祖まで解決してリンク経由の重複を比較する。
 function comparablePath(path: string): string {
   const suffix: string[] = [];
+  const visited = new Set<string>();
   let current = path;
   for (;;) {
     try {
       return resolve(realpathSync(current), ...suffix);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      try {
+        if (lstatSync(current).isSymbolicLink()) {
+          if (visited.has(current) || visited.size >= 40) throw new Error("保存先のシンボリックリンクが循環しています。");
+          visited.add(current);
+          current = resolve(dirname(current), readlinkSync(current));
+          continue;
+        }
+      } catch (inner) {
+        if ((inner as NodeJS.ErrnoException).code !== "ENOENT") throw inner;
+      }
       const parent = dirname(current);
       if (parent === current) throw error;
       suffix.unshift(basename(current));
       current = parent;
     }
   }
+}
+
+function claimPath(seen: Set<string>, path: string): void {
+  const canonical = comparablePath(path);
+  const keys = [`path:${canonical}`];
+  try {
+    const stat = statSync(canonical, { bigint: true });
+    keys.push(`inode:${stat.dev}:${stat.ino}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (keys.some(key => seen.has(key))) throw new Error("ノートの保存先が重複しています。");
+  for (const key of keys) seen.add(key);
 }
 
 export function factoryPaths(cwd: string, sessionId: string, note: string): FactoryPaths | undefined {
@@ -53,7 +77,8 @@ export function factoryPaths(cwd: string, sessionId: string, note: string): Fact
     if (typeof template !== "string" || !template.trim()) throw new Error(`${name} に空でないパスを指定してください。`);
     paths[name] = expandPath(cwd, template, sessionId);
   }
-  if (new Set([note, ...Object.values(paths)].map(comparablePath)).size !== 4) throw new Error("ノートの保存先が重複しています。");
+  const seen = new Set<string>();
+  for (const path of [note, ...Object.values(paths)]) claimPath(seen, path);
   return paths;
 }
 
@@ -72,7 +97,8 @@ function extraDocuments(cwd: string, sessionId: string, occupied: string[]): Ext
       !Array.isArray((config as { documents?: unknown }).documents)) {
     throw new Error("追加ノート設定には documents 配列を指定してください。");
   }
-  const seen = new Set(occupied.map(comparablePath));
+  const seen = new Set<string>();
+  for (const path of occupied) claimPath(seen, path);
   return (config as { documents: unknown[] }).documents.map((value) => {
     if (!value || typeof value !== "object" || Array.isArray(value) ||
         Object.keys(value).some(key => key !== "path" && key !== "description")) {
@@ -83,9 +109,7 @@ function extraDocuments(cwd: string, sessionId: string, occupied: string[]): Ext
       throw new Error("追加ノートの path と description は空でない文字列にしてください。");
     }
     const resolved = expandPath(cwd, path, sessionId);
-    const comparable = comparablePath(resolved);
-    if (seen.has(comparable)) throw new Error("ノートの保存先が重複しています。");
-    seen.add(comparable);
+    claimPath(seen, resolved);
     return { path: resolved, description };
   });
 }

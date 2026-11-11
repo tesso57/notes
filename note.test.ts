@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, linkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { createMockPi } from "./tests/helpers/mock-pi.ts";
@@ -157,6 +157,49 @@ test("シンボリックリンク経由で同じ保存先を指定したら記�
     await mock.run();
     assert.equal(mock.messages.length, 0);
     assert.match(mock.notifications[0], /重複/);
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("リンク先が未作成のシンボリックリンク経由の重複を拒否する", async () => {
+  const cwd = mkdtempSync(resolve(tmpdir(), "pi-notes-dangling-"));
+  try {
+    mkdirSync(resolve(cwd, ".pi"));
+    mkdirSync(resolve(cwd, "_notes", "test-session"), { recursive: true });
+    symlinkSync("note.md", resolve(cwd, "_notes/test-session/alias.md"));
+    writeFileSync(resolve(cwd, ".pi/notes-extra.json"), JSON.stringify({ documents: [{ path: "_notes/{sessionId}/alias.md", description: "記録" }] }));
+    const mock = setup(cwd);
+    await mock.run();
+    assert.equal(mock.messages.length, 0);
+    assert.match(mock.notifications[0], /重複/);
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("ハードリンクによる既存ノートの重複を拒否する", async () => {
+  const cwd = mkdtempSync(resolve(tmpdir(), "pi-notes-hardlink-"));
+  try {
+    mkdirSync(resolve(cwd, ".pi"));
+    mkdirSync(resolve(cwd, "_notes", "test-session"), { recursive: true });
+    writeFileSync(resolve(cwd, "_notes/test-session/note.md"), "既存ノート");
+    linkSync(resolve(cwd, "_notes/test-session/note.md"), resolve(cwd, "_notes/test-session/alias.md"));
+    writeFileSync(resolve(cwd, ".pi/notes-extra.json"), JSON.stringify({ documents: [{ path: "_notes/{sessionId}/alias.md", description: "記録" }] }));
+    const mock = setup(cwd);
+    await mock.run();
+    assert.equal(mock.messages.length, 0);
+    assert.match(mock.notifications[0], /重複/);
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("循環するシンボリックリンクは保存依頼を開始せず通知する", async () => {
+  const cwd = mkdtempSync(resolve(tmpdir(), "pi-notes-loop-"));
+  try {
+    mkdirSync(resolve(cwd, ".pi"));
+    symlinkSync("b", resolve(cwd, "a"));
+    symlinkSync("a", resolve(cwd, "b"));
+    writeFileSync(resolve(cwd, ".pi/notes-extra.json"), JSON.stringify({ documents: [{ path: "a/file.md", description: "記録" }] }));
+    const mock = setup(cwd);
+    await mock.run();
+    assert.equal(mock.messages.length, 0);
+    assert.equal(mock.notifications.length, 1);
   } finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
