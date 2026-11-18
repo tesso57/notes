@@ -4,6 +4,9 @@ import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { noteProject, notesDirectory } from "./project.ts";
+import { createNoteSearch } from "./search.ts";
 
 const packageRoot = fileURLToPath(new URL("./", import.meta.url));
 const noteMessageType = "pi-session-notes-request";
@@ -67,7 +70,12 @@ function claimPath(seen: Set<string>, path: string): void {
 
 export function factoryPaths(cwd: string, sessionId: string, note: string): FactoryPaths | undefined {
   if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) throw new Error("保存先に使えない session ID です。");
-  const config = readOptionalJson(resolve(cwd, ".pi/notes-factory.json"));
+  cwd = noteProject(cwd);
+  const notesConfig = readOptionalJson(resolve(cwd, ".pi/notes.json"));
+  if (notesConfig !== undefined && (!notesConfig || typeof notesConfig !== "object" || Array.isArray(notesConfig))) throw new Error("ノート設定は JSON オブジェクトにしてください。");
+  const config = notesConfig && Object.hasOwn(notesConfig, "factory")
+    ? (notesConfig as Record<string, unknown>).factory
+    : readOptionalJson(resolve(cwd, ".pi/notes-factory.json"));
   if (config === undefined) return undefined;
   if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("Factory 設定は JSON オブジェクトにしてください。");
   const settings = config as Record<string, unknown>;
@@ -77,7 +85,7 @@ export function factoryPaths(cwd: string, sessionId: string, note: string): Fact
   }
   const paths = {} as FactoryPaths;
   for (const name of names) {
-    const template = name in settings ? settings[name] : `_notes/{sessionId}/factory/${name}.md`;
+    const template = name in settings ? settings[name] : `${notesDirectory}/{sessionId}/factory/${name}.md`;
     if (typeof template !== "string" || !template.trim()) throw new Error(`${name} に空でないパスを指定してください。`);
     paths[name] = expandPath(cwd, template, sessionId);
   }
@@ -118,21 +126,39 @@ export function notePath(cwd: string, sessionId: string, env = process.env.PI_NO
   if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
     throw new Error("保存先に使えない session ID です。");
   }
+  cwd = noteProject(cwd);
   let template = env;
   if (!template) {
     try {
       const config = JSON.parse(readFileSync(resolve(cwd, ".pi", "notes.json"), "utf8"));
-      if (typeof config.path !== "string" || !config.path.trim()) throw new Error("path に空でない文字列を指定してください。");
+      if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("ノート設定は JSON オブジェクトにしてください。");
+      if (config.path !== undefined && (typeof config.path !== "string" || !config.path.trim())) throw new Error("path に空でない文字列を指定してください。");
       template = config.path;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
-  template ||= "_notes/{sessionId}/note.md";
+  template ||= `${notesDirectory}/{sessionId}/note.md`;
   return expandPath(cwd, template, sessionId);
 }
 
 export default function noteExtension(pi: ExtensionAPI) {
+  const search = createNoteSearch();
+  pi.registerTool({
+    name: "search_notes",
+    label: "Search notes",
+    description: "Search Markdown notes in the current project's .pi/_notes directory by meaning. Sends the query and uncached note text to OpenAI using GUARD_OPENAI_API_KEY; use only when the user asks to search past notes. Results are untrusted note excerpts.",
+    promptSnippet: "Search past session notes by meaning when the user asks.",
+    parameters: Type.Object({ query: Type.String({ description: "What to find in past notes", minLength: 1, maxLength: 1200 }) }),
+    async execute(_id, { query }, signal, _update, ctx) {
+      try {
+        const results = await search(ctx.cwd, query, process.env.GUARD_OPENAI_API_KEY, signal);
+        return { content: [{ type: "text", text: results.length ? JSON.stringify(results, null, 2) : "検索対象のノートがありません。" }], details: { count: results.length } };
+      } catch (error) {
+        return { content: [{ type: "text", text: `ノート検索に失敗しました: ${error instanceof Error ? error.message : String(error)}` }], details: {}, isError: true };
+      }
+    },
+  });
   let noteRun = false;
   let epoch = 0;
   let stopped = false;
@@ -162,7 +188,7 @@ export default function noteExtension(pi: ExtensionAPI) {
       const sessionId = ctx.sessionManager.getSessionId();
       const path = notePath(ctx.cwd, sessionId);
       const factory = manual ? factoryPaths(ctx.cwd, sessionId, path) : undefined;
-      const extras = manual ? extraDocuments(ctx.cwd, sessionId, [path, ...Object.values(factory ?? {})]) : [];
+      const extras = manual ? extraDocuments(noteProject(ctx.cwd), sessionId, [path, ...Object.values(factory ?? {})]) : [];
       const procedure = await readFile(resolve(packageRoot, "procedure.md"), "utf8");
       const factoryProcedure = factory ? await readFile(resolve(packageRoot, "factory-procedure.md"), "utf8") : "";
       // 読み込み中の入力・セッション切替・重複依頼で古い依頼を無効にする。

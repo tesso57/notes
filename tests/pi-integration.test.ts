@@ -25,7 +25,7 @@ async function makeSession(dir: string, fake: ReturnType<typeof createFakeModel>
 test("Pi の応答完了後、追加の記録ターンでノートを保存する", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pi-notes-integration-"));
   const sessions = SessionManager.inMemory(dir);
-  const path = join(dir, "_notes", sessions.getSessionId(), "note.md");
+  const path = join(dir, ".pi/_notes", sessions.getSessionId(), "note.md");
   const fake = createFakeModel([
     { content: [{ type: "text", text: "回答" }] },
     { content: [{ type: "toolCall", id: "write-note", name: "write", arguments: { path, content: "自動記録" } }] },
@@ -46,7 +46,7 @@ test("Pi の応答完了後、追加の記録ターンでノートを保存す�
 test("/note で追加ファイルを依頼し、既存ノートを読んでから保存できる", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pi-notes-integration-"));
   const sessions = SessionManager.inMemory(dir);
-  const note = join(dir, "_notes", sessions.getSessionId(), "note.md");
+  const note = join(dir, ".pi/_notes", sessions.getSessionId(), "note.md");
   const extra = join(dir, "_notes", sessions.getSessionId(), "handoff.md");
   const fake = createFakeModel([
     { content: [{ type: "toolCall", id: "read-note", name: "read", arguments: { path: note } }] },
@@ -55,7 +55,7 @@ test("/note で追加ファイルを依頼し、既存ノートを読んでか�
   ]);
   try {
     await mkdir(join(dir, ".pi"));
-    await mkdir(join(dir, "_notes", sessions.getSessionId()), { recursive: true });
+    await mkdir(join(dir, ".pi/_notes", sessions.getSessionId()), { recursive: true });
     await writeFile(note, "既存ノート");
     await writeFile(join(dir, ".pi", "notes-extra.json"), JSON.stringify({ documents: [{ path: "_notes/{sessionId}/handoff.md", description: "引き継ぎ" }] }));
     const session = await makeSession(dir, fake, sessions);

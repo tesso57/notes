@@ -26,6 +26,7 @@ export function createMockPi() {
     registerToolRenderer(resolver: Parameters<ExtensionAPI["registerToolRenderer"]>[0]) { renderer = resolver; },
     sendMessage(message: Parameters<ExtensionAPI["sendMessage"]>[0], options?: Parameters<ExtensionAPI["sendMessage"]>[1]) { messages.push({ message, options }); },
     registerCommand(name: string, command: Command) { commands.set(name, command); },
+    registerTool() {},
     on(name: string, handler: EventHandler) {
       const handlers = events.get(name) ?? [];
       handlers.push(handler);

@@ -37,11 +37,27 @@ function setup(cwd = root) {
 test("セッション開始時に guard へノートのディレクトリを通知する", async () => {
   const mock = setup();
   await mock.emit("session_start");
-  assert.deepEqual(mock.events, [{ name: "guard:trust-dir", data: { path: resolve(root, "_notes/test-session"), by: "note" } }]);
+  assert.deepEqual(mock.events, [{ name: "guard:trust-dir", data: { path: resolve(root, ".pi/_notes/test-session"), by: "note" } }]);
 });
 
 test("Factory は明示的な設定がなければ無効", () => {
   assert.equal(factoryPaths(root, "abc", notePath(root, "abc", "")), undefined);
+});
+
+test("notes.json の factory は旧設定より優先し、パスの重複と不正値を検査する", () => {
+  const cwd = mkdtempSync(resolve(tmpdir(), "pi-notes-unified-"));
+  try {
+    mkdirSync(resolve(cwd, ".pi"));
+    writeFileSync(resolve(cwd, ".pi/notes-factory.json"), JSON.stringify({ plan: "old.md" }));
+    const path = ".pi/_notes/{sessionId}/note.md";
+    const plan = ".pi/_notes/{sessionId}/factory/plan.md";
+    writeFileSync(resolve(cwd, ".pi/notes.json"), JSON.stringify({ path, factory: { plan } }));
+    assert.equal(factoryPaths(cwd, "abc", notePath(cwd, "abc", ""))?.plan, resolve(cwd, ".pi/_notes/abc/factory/plan.md"));
+    for (const factory of [null, [], { plan: path }]) {
+      writeFileSync(resolve(cwd, ".pi/notes.json"), JSON.stringify({ path, factory }));
+      assert.throws(() => factoryPaths(cwd, "abc", notePath(cwd, "abc", "")));
+    }
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
 test("Factory の保存先はセッション別で、個別に設定できる", () => {
@@ -50,11 +66,11 @@ test("Factory の保存先はセッション別で、個別に設定できる", 
     mkdirSync(resolve(cwd, ".pi"));
     writeFileSync(resolve(cwd, ".pi/notes-factory.json"), JSON.stringify({ review: "../shared/{sessionId}/review.md" }));
     assert.deepEqual(factoryPaths(cwd, "abc", notePath(cwd, "abc", "")), {
-      plan: resolve(cwd, "_notes/abc/factory/plan.md"),
+      plan: resolve(cwd, ".pi/_notes/abc/factory/plan.md"),
       review: resolve(cwd, "../shared/abc/review.md"),
-      learnings: resolve(cwd, "_notes/abc/factory/learnings.md"),
+      learnings: resolve(cwd, ".pi/_notes/abc/factory/learnings.md"),
     });
-    writeFileSync(resolve(cwd, ".pi/notes-factory.json"), JSON.stringify({ plan: "_notes/{sessionId}/note.md" }));
+    writeFileSync(resolve(cwd, ".pi/notes-factory.json"), JSON.stringify({ plan: ".pi/_notes/{sessionId}/note.md" }));
     assert.throws(() => factoryPaths(cwd, "abc", notePath(cwd, "abc", "")), /重複/);
     writeFileSync(resolve(cwd, ".pi/notes-factory.json"), JSON.stringify({ plan: "same.md", review: "same.md" }));
     assert.throws(() => factoryPaths(cwd, "abc", notePath(cwd, "abc", "")), /重複/);
@@ -77,15 +93,15 @@ test("Factory 設定時は通常ノートと分類別の記録を同じ実行で
     await mock.run();
     assert.equal(mock.messages.length, 2);
     for (const name of ["plan", "review", "learnings"]) {
-      assert.ok(mock.messages[1].content.includes(resolve(cwd, `_notes/test-session/factory/${name}.md`)));
+      assert.ok(mock.messages[1].content.includes(resolve(cwd, `.pi/_notes/test-session/factory/${name}.md`)));
     }
     assert.ok(mock.messages[1].content.includes("既存ファイル"));
     assert.ok(mock.messages[1].content.includes("子エージェント"));
     assert.ok(mock.messages[1].content.includes("末尾に追記"));
     assert.deepEqual(mock.events.map(event => (event.data as { path: string }).path), [
-      resolve(cwd, "_notes/test-session"),
-      resolve(cwd, "_notes/test-session"),
-      resolve(cwd, "_notes/test-session"), resolve(cwd, "_notes/test-session/factory"),
+      resolve(cwd, ".pi/_notes/test-session"),
+      resolve(cwd, ".pi/_notes/test-session"),
+      resolve(cwd, ".pi/_notes/test-session"), resolve(cwd, ".pi/_notes/test-session/factory"),
     ]);
   } finally { rmSync(cwd, { recursive: true, force: true }); }
 });
@@ -97,7 +113,7 @@ test("不正な手動用設定があっても通常ノートの開始時通知�
     writeFileSync(resolve(cwd, ".pi/notes-factory.json"), "invalid");
     const mock = setup(cwd);
     await mock.emit("session_start");
-    assert.deepEqual(mock.events, [{ name: "guard:trust-dir", data: { path: resolve(cwd, "_notes/test-session"), by: "note" } }]);
+    assert.deepEqual(mock.events, [{ name: "guard:trust-dir", data: { path: resolve(cwd, ".pi/_notes/test-session"), by: "note" } }]);
     assert.equal(mock.notifications.length, 0);
     await mock.emit("agent_settled", { aborted: false });
     assert.equal(mock.messages.length, 1);
@@ -134,7 +150,7 @@ test("追加ファイルが通常ノートや Factory と衝突したら保存�
   try {
     mkdirSync(resolve(cwd, ".pi"));
     writeFileSync(resolve(cwd, ".pi/notes-factory.json"), "{}");
-    for (const path of ["_notes/{sessionId}/note.md", "_notes/{sessionId}/factory/plan.md"]) {
+    for (const path of [".pi/_notes/{sessionId}/note.md", ".pi/_notes/{sessionId}/factory/plan.md"]) {
       writeFileSync(resolve(cwd, ".pi/notes-extra.json"), JSON.stringify({ documents: [{ path, description: "記録" }] }));
       const mock = setup(cwd);
       await mock.run();
@@ -164,8 +180,8 @@ test("シンボリックリンク経由で同じ保存先を指定したら記�
   const cwd = mkdtempSync(resolve(tmpdir(), "pi-notes-alias-"));
   try {
     mkdirSync(resolve(cwd, ".pi"));
-    mkdirSync(resolve(cwd, "_notes"));
-    symlinkSync(resolve(cwd, "_notes"), resolve(cwd, "alias"));
+    mkdirSync(resolve(cwd, ".pi/_notes"));
+    symlinkSync(resolve(cwd, ".pi/_notes"), resolve(cwd, "alias"));
     writeFileSync(resolve(cwd, ".pi/notes-extra.json"), JSON.stringify({ documents: [
       { path: "alias/{sessionId}/note.md", description: "記録" },
     ] }));
@@ -180,9 +196,9 @@ test("リンク先が未作成のシンボリックリンク経由の重複を�
   const cwd = mkdtempSync(resolve(tmpdir(), "pi-notes-dangling-"));
   try {
     mkdirSync(resolve(cwd, ".pi"));
-    mkdirSync(resolve(cwd, "_notes", "test-session"), { recursive: true });
-    symlinkSync("note.md", resolve(cwd, "_notes/test-session/alias.md"));
-    writeFileSync(resolve(cwd, ".pi/notes-extra.json"), JSON.stringify({ documents: [{ path: "_notes/{sessionId}/alias.md", description: "記録" }] }));
+    mkdirSync(resolve(cwd, ".pi/_notes", "test-session"), { recursive: true });
+    symlinkSync("note.md", resolve(cwd, ".pi/_notes/test-session/alias.md"));
+    writeFileSync(resolve(cwd, ".pi/notes-extra.json"), JSON.stringify({ documents: [{ path: ".pi/_notes/{sessionId}/alias.md", description: "記録" }] }));
     const mock = setup(cwd);
     await mock.run();
     assert.equal(mock.messages.length, 0);
@@ -194,10 +210,10 @@ test("ハードリンクによる既存ノートの重複を拒否する", async
   const cwd = mkdtempSync(resolve(tmpdir(), "pi-notes-hardlink-"));
   try {
     mkdirSync(resolve(cwd, ".pi"));
-    mkdirSync(resolve(cwd, "_notes", "test-session"), { recursive: true });
-    writeFileSync(resolve(cwd, "_notes/test-session/note.md"), "既存ノート");
-    linkSync(resolve(cwd, "_notes/test-session/note.md"), resolve(cwd, "_notes/test-session/alias.md"));
-    writeFileSync(resolve(cwd, ".pi/notes-extra.json"), JSON.stringify({ documents: [{ path: "_notes/{sessionId}/alias.md", description: "記録" }] }));
+    mkdirSync(resolve(cwd, ".pi/_notes", "test-session"), { recursive: true });
+    writeFileSync(resolve(cwd, ".pi/_notes/test-session/note.md"), "既存ノート");
+    linkSync(resolve(cwd, ".pi/_notes/test-session/note.md"), resolve(cwd, ".pi/_notes/test-session/alias.md"));
+    writeFileSync(resolve(cwd, ".pi/notes-extra.json"), JSON.stringify({ documents: [{ path: ".pi/_notes/{sessionId}/alias.md", description: "記録" }] }));
     const mock = setup(cwd);
     await mock.run();
     assert.equal(mock.messages.length, 0);
@@ -220,7 +236,7 @@ test("循環するシンボリックリンクは保存依頼を開始せず通�
 });
 
 test("session ID を固定ノートのパスに解決する", () => {
-  assert.equal(notePath(root, "session-123"), resolve(root, "_notes/session-123/note.md"));
+  assert.equal(notePath(root, "session-123"), resolve(root, ".pi/_notes/session-123/note.md"));
   for (const id of ["", ".", "..", "../outside", "/tmp/outside", "a/b", "a\\b", "a b"]) {
     assert.throws(() => notePath(root, id));
   }
@@ -230,7 +246,7 @@ test("手動保存は作業ディレクトリの保存先と session ID を使�
   const mock = setup();
   await mock.run();
   assert.equal(mock.messages.length, 1);
-  assert.ok(mock.messages[0].content.includes(JSON.stringify(resolve(root, "_notes/test-session/note.md"))));
+  assert.ok(mock.messages[0].content.includes(JSON.stringify(resolve(root, ".pi/_notes/test-session/note.md"))));
   assert.ok(mock.messages[0].content.includes('"sessionFile":null'));
   assert.ok(mock.messages[0].content.includes("別ファイルには分割しない"));
   assert.ok(mock.messages[0].content.includes("ノートを更新しました。"));
@@ -347,4 +363,25 @@ test("設定ファイルと環境変数でファイル名を含めて保存先�
     writeFileSync(resolve(cwd, ".pi/notes.json"), "invalid");
     assert.throws(() => notePath(cwd, "abc", ""));
   } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("サブディレクトリから同じ設定・保存先を使い、guard に保存先の親を通知する", async () => {
+  const project = mkdtempSync(resolve(tmpdir(), "nested-notes-"));
+  try {
+    const sub = resolve(project, "packages/app");
+    mkdirSync(resolve(sub, ".pi"), { recursive: true });
+    writeFileSync(resolve(project, ".git"), "gitdir: /test/worktree");
+    assert.equal(notePath(sub, "abc", ""), resolve(project, ".pi/_notes/abc/note.md"));
+    mkdirSync(resolve(project, ".pi"));
+    writeFileSync(resolve(project, ".pi/notes.json"), JSON.stringify({ factory: {} }));
+    const mock = setup(sub);
+    await mock.run();
+    const base = resolve(project, ".pi/_notes/test-session");
+    assert.deepEqual(mock.events.map(event => event.data), [
+      { path: base, by: "note" }, { path: resolve(base, "factory"), by: "note" },
+    ]);
+    assert.ok(mock.messages[0].content.includes(resolve(base, "note.md")));
+    writeFileSync(resolve(project, ".pi/notes.json"), JSON.stringify({ path: "_notes/{sessionId}/note.md" }));
+    assert.equal(notePath(sub, "abc", ""), resolve(project, "_notes/abc/note.md"));
+  } finally { rmSync(project, { recursive: true, force: true }); }
 });
