@@ -162,6 +162,13 @@ export default function noteExtension(pi: ExtensionAPI) {
   let noteRun = false;
   let epoch = 0;
   let stopped = false;
+  let activeRead: AbortController | undefined;
+
+  const invalidateRequest = () => {
+    epoch++;
+    activeRead?.abort();
+    activeRead = undefined;
+  };
 
   // レンダラーだけを差し替え、ツールの実行や guard の判定には介入しない。
   // resolver はツール行の生成時に呼ばれるため、その時点でノート化中かを固定する。
@@ -183,20 +190,29 @@ export default function noteExtension(pi: ExtensionAPI) {
   });
 
   const requestNote = async (ctx: ExtensionContext, manual = false) => {
-    const requestEpoch = ++epoch;
+    invalidateRequest();
+    const requestEpoch = epoch;
+    const isCurrent = () => !stopped && epoch === requestEpoch;
+    const canProceed = () => {
+      if (!isCurrent()) return false;
+      if (ctx.isIdle() && !ctx.hasPendingMessages()) return true;
+      if (manual) ctx.ui.notify("待機中の処理が終わってから /note を実行してください。", "warning");
+      return false;
+    };
+    const controller = new AbortController();
     try {
+      if (!canProceed()) return;
       const sessionId = ctx.sessionManager.getSessionId();
       const path = notePath(ctx.cwd, sessionId);
       const factory = manual ? factoryPaths(ctx.cwd, sessionId, path) : undefined;
       const extras = manual ? extraDocuments(noteProject(ctx.cwd), sessionId, [path, ...Object.values(factory ?? {})]) : [];
-      const procedure = await readFile(resolve(packageRoot, "procedure.md"), "utf8");
-      const factoryProcedure = factory ? await readFile(resolve(packageRoot, "factory-procedure.md"), "utf8") : "";
-      // 読み込み中の入力・セッション切替・重複依頼で古い依頼を無効にする。
-      if (stopped || epoch !== requestEpoch) return;
-      if (!ctx.isIdle() || ctx.hasPendingMessages()) {
-        if (manual) ctx.ui.notify("待機中の処理が終わってから /note を実行してください。", "warning");
-        return;
-      }
+      activeRead = controller;
+      const options = { encoding: "utf8", signal: controller.signal } as const;
+      const [procedure, factoryProcedure] = await Promise.all([
+        readFile(resolve(packageRoot, "procedure.md"), options),
+        factory ? readFile(resolve(packageRoot, "factory-procedure.md"), options) : "",
+      ]);
+      if (!canProceed()) return;
       const source = {
         sessionId,
         sessionFile: ctx.sessionManager.getSessionFile() ?? null,
@@ -224,12 +240,17 @@ export default function noteExtension(pi: ExtensionAPI) {
         ].join("\n"),
       }, { triggerTurn: true });
     } catch (error) {
-      ctx.ui.notify(`ノート作成を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`, "error");
+      controller.abort();
+      if (isCurrent()) {
+        ctx.ui.notify(`ノート作成を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+    } finally {
+      if (activeRead === controller) activeRead = undefined;
     }
   };
 
   pi.on("session_start", (_event, ctx) => {
-    epoch++;
+    invalidateRequest();
     noteRun = stopped = false;
     try {
       const path = notePath(ctx.cwd, ctx.sessionManager.getSessionId());
@@ -240,15 +261,15 @@ export default function noteExtension(pi: ExtensionAPI) {
   });
   pi.on("session_shutdown", () => {
     stopped = true;
-    epoch++;
+    invalidateRequest();
   });
-  pi.on("input", () => { epoch++; });
-  pi.on("session_before_switch", () => { epoch++; });
-  pi.on("session_before_fork", () => { epoch++; });
-  pi.on("session_before_compact", () => { epoch++; });
-  pi.on("session_before_tree", () => { epoch++; });
+  pi.on("input", invalidateRequest);
+  pi.on("session_before_switch", invalidateRequest);
+  pi.on("session_before_fork", invalidateRequest);
+  pi.on("session_before_compact", invalidateRequest);
+  pi.on("session_before_tree", invalidateRequest);
   pi.on("before_agent_start", (event) => {
-    epoch++;
+    invalidateRequest();
     noteRun = event.messageType === "custom" && event.message.customType === noteMessageType;
   });
   pi.on("agent_settled", async (event, ctx) => {

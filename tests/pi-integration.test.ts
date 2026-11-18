@@ -43,20 +43,28 @@ test("Pi の応答完了後、追加の記録ターンでノートを保存す�
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("/note で追加ファイルを依頼し、既存ノートを読んでから保存できる", async () => {
+test("/note で既存ノートを読み、Factory と追加ノートを保存できる", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pi-notes-integration-"));
   const sessions = SessionManager.inMemory(dir);
   const note = join(dir, ".pi/_notes", sessions.getSessionId(), "note.md");
   const extra = join(dir, "_notes", sessions.getSessionId(), "handoff.md");
+  const factory = ["plan", "review", "learnings"].map(name =>
+    join(dir, ".pi/_notes", sessions.getSessionId(), "factory", name + ".md"));
   const fake = createFakeModel([
     { content: [{ type: "toolCall", id: "read-note", name: "read", arguments: { path: note } }] },
-    { content: [{ type: "toolCall", id: "write-extra", name: "write", arguments: { path: extra, content: "引き継ぎ" } }] },
+    { content: [
+      { type: "toolCall", id: "write-extra", name: "write", arguments: { path: extra, content: "引き継ぎ" } },
+      ...factory.map((path, i) => ({
+        type: "toolCall" as const, id: "write-factory-" + i, name: "write", arguments: { path, content: "Factory 記録" },
+      })),
+    ] },
     { content: [{ type: "text", text: "ノートを更新しました。" }] },
   ]);
   try {
     await mkdir(join(dir, ".pi"));
     await mkdir(join(dir, ".pi/_notes", sessions.getSessionId()), { recursive: true });
     await writeFile(note, "既存ノート");
+    await writeFile(join(dir, ".pi", "notes.json"), JSON.stringify({ factory: {} }));
     await writeFile(join(dir, ".pi", "notes-extra.json"), JSON.stringify({ documents: [{ path: "_notes/{sessionId}/handoff.md", description: "引き継ぎ" }] }));
     const session = await makeSession(dir, fake, sessions);
     try {
@@ -64,7 +72,13 @@ test("/note で追加ファイルを依頼し、既存ノートを読んでか�
       await session.waitForIdle();
       assert.equal(await readFile(note, "utf8"), "既存ノート");
       assert.equal(await readFile(extra, "utf8"), "引き継ぎ");
-      assert.ok(session.messages.some(message => message.role === "custom" && JSON.stringify(message.content).includes(extra)));
+      const request = session.messages.find(message => message.role === "custom" && message.customType === "pi-session-notes-request");
+      assert.ok(request?.role === "custom");
+      const content = JSON.stringify(request.content);
+      for (const path of [extra, ...factory]) {
+        assert.ok(content.includes(path));
+      }
+      assert.deepEqual(await Promise.all(factory.map(path => readFile(path, "utf8"))), factory.map(() => "Factory 記録"));
       const result = session.messages.find(message => message.role === "toolResult" && message.toolCallId === "read-note");
       assert.ok(result && result.role === "toolResult" && !result.isError);
       assert.match(JSON.stringify(result.content), /既存ノート/);
