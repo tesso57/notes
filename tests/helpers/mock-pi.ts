@@ -3,7 +3,6 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 type Command = Parameters<ExtensionAPI["registerCommand"]>[1];
 type EventHandler = (event: never, context: ExtensionContext) => unknown;
 
-/** Partial Pi double: unsupported APIs fail rather than silently succeeding. */
 export function createMockPi() {
   const commands = new Map<string, Command>();
   const events = new Map<string, EventHandler[]>();

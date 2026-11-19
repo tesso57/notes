@@ -9,7 +9,6 @@ const chunkSize = 1200;
 type Chunk = { path: string; line: number; text: string; hash: string };
 type Result = { path: string; line: number; text: string; score: number };
 
-// Headings anchor chunk boundaries so edits in one section do not shift later ones.
 function splitNote(path: string, text: string): Chunk[] {
   const chunks: Chunk[] = [];
   let part = "";
@@ -124,7 +123,6 @@ async function writeCache(path: string, cache: Cache): Promise<void> {
 }
 
 export function createNoteSearch() {
-  // Keep the last parsed snapshot. Atomic replacement gives other writers a new inode.
   let previous: { path: string; revision: string; cache: Cache } | undefined;
   return async (cwd: string, query: string, key: string | undefined, signal?: AbortSignal): Promise<Result[]> => {
     const q = query.trim();
@@ -132,7 +130,6 @@ export function createNoteSearch() {
     signal?.throwIfAborted();
     const project = noteProject(cwd);
     const root = resolve(project, notesDirectory);
-    // Never follow a linked index root into unrelated project or user data.
     for (const dir of [join(project, ".pi"), root]) {
       const info = await lstat(dir).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
@@ -152,7 +149,6 @@ export function createNoteSearch() {
     const stored = previous && previous.path === cachePath && previous.revision === revision
       ? previous.cache : info ? await readCache(cachePath) : emptyCache();
     if (revision) previous = { path: cachePath, revision, cache: stored };
-    // Mutate a private copy so a failed or concurrent search cannot change the snapshot.
     const cache = { notes: new Map(stored.notes), queries: new Map(stored.queries) };
     for (const hash of cache.notes.keys()) if (!unique.has(hash)) cache.notes.delete(hash);
     const pruned = cache.notes.size !== stored.notes.size;

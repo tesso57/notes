@@ -4,7 +4,6 @@ import { dirname, join, resolve } from "node:path";
 
 export const notesDirectory = ".pi/_notes";
 
-// A worktree may have a .git file. Never inherit the user's global ~/.pi.
 export function noteProject(cwd: string): string {
   const start = resolve(cwd);
   let piRoot: string | undefined;

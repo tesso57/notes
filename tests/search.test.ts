@@ -119,7 +119,6 @@ test("サブディレクトリからも旧集約ノートを検索・送信せ�
   await mkdir(join(project, "sub"));
   await writeFile(join(project, ".pi/_notes/new.md"), "new");
   await writeFile(join(project, "_notes/old.md"), "old");
-  // A directory at the old cache path makes any attempted cache import fail.
   await mkdir(join(project, "_notes/.notes-search-cache.json"));
   const requests: string[][] = [];
   t.mock.method(globalThis, "fetch", async (_url: string, init: RequestInit) => {

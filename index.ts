@@ -27,7 +27,6 @@ function readOptionalJson(path: string): unknown {
   }
 }
 
-// 存在しない保存先も、存在する先祖まで解決してリンク経由の重複を比較する。
 function comparablePath(path: string): string {
   const suffix: string[] = [];
   const visited = new Set<string>();
@@ -121,7 +120,6 @@ function extraDocuments(cwd: string, sessionId: string, occupied: string[]): Ext
   });
 }
 
-/** Resolve a destination template against the project working directory. */
 export function notePath(cwd: string, sessionId: string, env = process.env.PI_NOTES_PATH): string {
   if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
     throw new Error("保存先に使えない session ID です。");
@@ -170,8 +168,6 @@ export default function noteExtension(pi: ExtensionAPI) {
     activeRead = undefined;
   };
 
-  // レンダラーだけを差し替え、ツールの実行や guard の判定には介入しない。
-  // resolver はツール行の生成時に呼ばれるため、その時点でノート化中かを固定する。
   pi.registerToolRenderer((_name, next) => {
     if (!noteRun) return next();
     const empty = () => ({ render: () => [], invalidate: () => {} });
@@ -222,10 +218,8 @@ export default function noteExtension(pi: ExtensionAPI) {
       for (const dir of new Set([path, ...Object.values(factory ?? {}), ...extras.map(extra => extra.path)].map(dirname))) {
         pi.events.emit("guard:trust-dir", { path: dir, by: "note" });
       }
-      // custom message として送り、ユーザーの相談とノート化の実行を区別する。
       pi.sendMessage({
         customType: noteMessageType,
-        // 手順全文はモデルへ渡すが、チャット画面には表示しない。
         display: false,
         content: [
           "ここまでの会話を、次の手順に従ってノートとして実際に保存してください。",
@@ -275,7 +269,6 @@ export default function noteExtension(pi: ExtensionAPI) {
   pi.on("agent_settled", async (event, ctx) => {
     const wasNoteRun = noteRun;
     noteRun = false;
-    // 保存失敗や中断でも、自動リトライの無限ループにはしない。
     if (stopped || wasNoteRun || event.aborted) return;
     await requestNote(ctx);
   });
